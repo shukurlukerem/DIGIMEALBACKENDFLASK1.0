@@ -1,26 +1,30 @@
-import os
-import uuid
-import string
-import qrcode
-import base64
-import json
-from PIL import Image
-import atexit
-import logging
-import random
-from io import BytesIO
-from datetime import date
-from flask_cors import CORS
-from flask import Flask, request, jsonify
-#from apscheduler.schedulers.background import BackgroundScheduler
-import jwt
-import datetime
-from functools import wraps
-import psycopg2 
-import dotenv
+import os 
+import uuid 
+import string 
 from dotenv import load_dotenv
+import psycopg2
+import qrcode 
+import base64 
+import json 
+from PIL import Image 
+from flask_cors import cross_origin 
+import smtplib 
+import ssl 
+from email.mime.text import MIMEText 
+from email.mime.multipart import MIMEMultipart 
+import atexit 
+import logging 
+import random 
+import sqlite3 
+from io import BytesIO 
+from datetime import date 
+from flask_cors import CORS 
+from flask import Flask, request, jsonify 
+import jwt 
+import datetime 
+from functools import wraps
 
-# Initialize Flask app
+
 app = Flask(__name__)
 CORS(app, resources={r"*": {"origins": "*"}})
 
@@ -123,7 +127,7 @@ def check_scanner_login(scanner_username, scanner_password):
     try:
         conn =  get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM scanner_identification WHERE scanner_username = ? AND scanner_password = ?", 
+        cursor.execute("SELECT * FROM scanner_identification WHERE scanner_username = %s AND scanner_password = %s", 
                        (scanner_username, scanner_password))
         scanner = cursor.fetchone()
         if scanner:
@@ -163,7 +167,33 @@ def check_login(username, password):
 
 
 def generate_otp():
-    return str(random.randint(1000, 9999))
+    return str(random.randint(100000, 999999))
+
+def send_otp(receiver_email, username, otp): 
+    sender_email = os.getenv('send_email') 
+    sender_password =  os.getenv('send_email_password')
+ 
+    subject = "Sizin OTP kodunuz!" 
+    body = f"Sizin bir dəfəlik OTP kodunuz: {otp}\n\n Bu OTP kodu 5 dəqiqə ərzində aktivdir. \n\n İstifadəçi adı: {username} \n\n Link: http://10.10.4.112:3000/user-pass-creater?" 
+ 
+    message = MIMEMultipart() 
+    message["From"] = sender_email 
+    message["To"] = receiver_email 
+    message["Subject"] = subject 
+    message.attach(MIMEText(body, "plain")) 
+ 
+    try: 
+        context = ssl.create_default_context() 
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server: 
+            server.login(sender_email, sender_password) 
+            server.sendmail(sender_email, receiver_email, message.as_string()) 
+ 
+        print(f"OTP sent successfully to {receiver_email}") 
+        return otp  # Return OTP for verification 
+ 
+    except Exception as e: 
+        print(f"Error sending OTP: {e}") 
+        return None
 
 def generate_username():
     conn = get_db_connection
@@ -180,16 +210,16 @@ def generate_username():
     finally:
         conn.close()
 
-# Generate a random password
-def generate_pass_for_user():
-    letters_and_digits = string.ascii_letters + string.digits
-    symbols = string.punctuation
+# # Generate a random password
+# def generate_pass_for_user():
+#     letters_and_digits = string.ascii_letters + string.digits
+#     symbols = string.punctuation
 
-    password = random.choice(symbols)
-    password += ''.join(random.choice(letters_and_digits) for _ in range(7))
-    password = ''.join(random.sample(password, len(password)))
+#     password = random.choice(symbols)
+#     password += ''.join(random.choice(letters_and_digits) for _ in range(7))
+#     password = ''.join(random.sample(password, len(password)))
 
-    return password
+#     return password
 
 def token_required(f):
     @wraps(f)
@@ -518,71 +548,72 @@ def get_not_approved_students_sp_admin():
         return jsonify({"error": "Database error", "details": str(e)}), 500
 
 
-@app.route('/request-otp/<email>', methods=['POST'])
-def request_otp(email):
-    if not email:
-        return jsonify({'message': 'Email is required'}), 400
+# @app.route('/request-otp/<email>', methods=['POST'])
+# def request_otp(email):
+#     if not email:
+#         return jsonify({'message': 'Email is required'}), 400
 
-    otp = generate_otp()
+#     otp = generate_otp()
 
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("UPDATE all_users SET otp = %s WHERE email = %s", (otp, email))
-                conn.commit()
+#     try:
+#         with get_db_connection() as conn:
+#             with conn.cursor() as cursor:
+#                 cursor.execute("UPDATE all_users SET otp = %s WHERE email = %s", (otp, email))
+#                 conn.commit()
 
-        return jsonify({'message': 'OTP set successfully'}), 200
+#         return jsonify({'message': 'OTP set successfully'}), 200
 
-    except psycopg2.Error as e:
-        return jsonify({'message': f'Database error: {e}'}), 500
+#     except psycopg2.Error as e:
+#         return jsonify({'message': f'Database error: {e}'}), 500
 
 
-@app.route('/verify-otp/<email>', methods=['POST'])
-def verify_otp(email):
+@app.route('/verify-otp', methods=['POST'])
+@token_required
+def verify_otp():
     data = request.json
+    username = data.get('username')
     otp = data.get('otp')
+    password = data.get('password')
+    print(password, username, otp)
     currentDate = datetime.date.today()
 
-    if not email or not otp:
-        return jsonify({'message': 'Email and OTP are required'}), 400
+    if not username or not otp or not password:
+        return jsonify({'message': 'Username, OTP, and password are required'}), 400
 
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                # Retrieve the OTP from the database
-                cursor.execute("SELECT otp FROM all_users WHERE email = %s", (email,))
-                result = cursor.fetchone()
+        conn = psycopg2.connect(**DB_CONFIG)
+        cursor = conn.cursor()
 
-                if result and result[0] == otp:
-                    digi_user = generate_username()
-                    digi_password = generate_pass_for_user()
+        # Retrieve the OTP from the database
+        cursor.execute("SELECT otp FROM all_users WHERE digimealusername = %s", (username,))
+        result = cursor.fetchone()
 
-                    cursor.execute("""
-                        UPDATE all_users 
-                        SET approved = 1, otp = NULL, digimealusername = %s, password = %s, qeydiyyat_tarixi = %s
-                        WHERE email = %s
-                    """, (digi_user, digi_password, email, currentDate))
+        if result and str(result[0]) == otp:
+            cursor.execute("""
+                UPDATE all_users  
+                SET approved = 1, otp = NULL, password = %s, qeydiyyat_tarixi = %s 
+                WHERE digimealusername = %s
+            """, (password, currentDate, username))
 
-                    cursor.execute("""
-                        UPDATE users 
-                        SET approved = 1, digimealusername = %s, password = %s 
-                        WHERE email = %s
-                    """, (digi_user, digi_password, email))
+            cursor.execute("""
+                UPDATE users  
+                SET approved = 1, password = %s  
+                WHERE digimealusername = %s
+            """, (password, username))
 
-                    conn.commit()
+            conn.commit()
+            cursor.close()
+            conn.close()
 
-                    return jsonify({
-                        'message': 'OTP verified successfully',
-                        'digimealusername': digi_user,
-                        'digipass': digi_password
-                    }), 200
-                else:
-                    return jsonify({'message': 'Invalid OTP'}), 400
-
+            return jsonify({
+                'message': 'OTP verified successfully',
+                'digimealusername': username
+            }), 200
+        else:
+            return jsonify({'message': 'Invalid OTP'}), 400
     except psycopg2.Error as e:
         return jsonify({'message': f'Database error: {e}'}), 500
 
-# sp-adm-en-session route
 @app.route('/sesion_end/<digimealusername>', methods=['GET'])
 @token_required
 def sesion_end(digimealusername):
@@ -1010,6 +1041,70 @@ def get_all_user_account():
     finally:
         if conn:
             conn.close()
+
+def send_otp(receiver_email): 
+    sender_email = "thik@aztu.edu.az" 
+    sender_password = "xjxi kknj rvmt sciz" 
+ 
+    otp = generate_otp() 
+     
+    # Email content 
+    subject = "Sizin OTP kodunuz!" 
+    body = f"Sizin bir dəfəlik OTP kodunuz: {otp}\n\n Bu OTP kodu 5 dəqiqə ərzində aktivdir." 
+ 
+    # Setup email headers 
+    message = MIMEMultipart() 
+    message["From"] = sender_email 
+    message["To"] = receiver_email 
+    message["Subject"] = subject 
+ 
+    # Attach email body 
+    message.attach(MIMEText(body, "plain")) 
+ 
+    # Secure connection with Gmail SMTP server 
+    try: 
+        context = ssl.create_default_context() 
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server: 
+            server.login(sender_email, sender_password) 
+            server.sendmail(sender_email, receiver_email, message.as_string()) 
+ 
+        print(f"OTP sent successfully to {receiver_email}") 
+        return otp  # Return OTP for verification 
+ 
+    except Exception as e: 
+        print(f"Error sending OTP: {e}") 
+        return None
+
+@app.route('/request-and-send-otp', methods=['POST'])
+@token_required
+def request_and_send_otp():
+    data = request.get_json()
+    receiver_email = data.get("email")
+    print(receiver_email)
+
+    if not receiver_email:
+        return jsonify({"success": False, "message": "Email is required"}), 400
+
+    otp = generate_otp()
+    username = generate_username()
+
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET digimealusername = %s WHERE email = %s", (username, receiver_email))
+        cursor.execute("UPDATE all_users SET otp = %s, digimealusername = %s WHERE email = %s", (otp, username, receiver_email))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except psycopg2.Error as e:
+        return jsonify({"success": False, "message": f"Database error: {e}"}), 500
+
+    otp_sent = send_otp(receiver_email, username, otp)
+    if otp_sent:
+        return jsonify({"success": True, "message": "OTP sent successfully"}), 200
+    else:
+        return jsonify({"success": False, "message": "Failed to send OTP"}), 5000
+
 
 
 if __name__ == '__main__':
